@@ -67,3 +67,4 @@ if __name__ == "__main__":
     print(box.shape)
     box = box.reshape(1, -1)
     print(boxes_to_corners_3d((box)))
+    
