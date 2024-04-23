@@ -119,20 +119,20 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
     logger.info('Average predicted number of objects(%d samples): %.3f'
                 % (len(det_annos), total_pred_objects / max(1, len(det_annos))))
 
-    with open(result_dir / 'result.pkl', 'wb') as f:
-        pickle.dump(det_annos, f)
-
-    result_str, result_dict = dataset.evaluation(
-        det_annos, class_names,
-        eval_metric=cfg.MODEL.POST_PROCESSING.EVAL_METRIC,
-        output_path=final_output_dir
-    )
-
-    logger.info(result_str)
-    ret_dict.update(result_dict)
-
-    logger.info('Result is saved to %s' % result_dir)
-    logger.info('****************Evaluation done.*****************')
+    # with open(result_dir / 'result.pkl', 'wb') as f:
+    #     pickle.dump(det_annos, f)
+    #
+    # result_str, result_dict = dataset.evaluation(
+    #     det_annos, class_names,
+    #     eval_metric=cfg.MODEL.POST_PROCESSING.EVAL_METRIC,
+    #     output_path=final_output_dir
+    # )
+    #
+    # logger.info(result_str)
+    # ret_dict.update(result_dict)
+    #
+    # logger.info('Result is saved to %s' % result_dir)
+    # logger.info('****************Evaluation done.*****************')
     return ret_dict
 
 

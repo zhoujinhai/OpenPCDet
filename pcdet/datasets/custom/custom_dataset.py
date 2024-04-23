@@ -3,10 +3,9 @@ import pickle
 import os
 
 import numpy as np
-
-from ...ops.roiaware_pool3d import roiaware_pool3d_utils
-from ...utils import box_utils, common_utils
-from ..dataset import DatasetTemplate
+from pcdet.ops.roiaware_pool3d import roiaware_pool3d_utils
+from pcdet.utils import box_utils, common_utils
+from pcdet.datasets.dataset import DatasetTemplate
 
 
 class CustomDataset(DatasetTemplate):
@@ -267,6 +266,9 @@ def create_custom_infos(dataset_cfg, class_names, data_path, save_path, workers=
 
 if __name__ == '__main__':
     import sys
+    from pathlib import Path
+    ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
+    print(ROOT_DIR)
 
     if sys.argv.__len__() > 1 and sys.argv[1] == 'create_custom_infos':
         import yaml
@@ -276,8 +278,9 @@ if __name__ == '__main__':
         dataset_cfg = EasyDict(yaml.safe_load(open(sys.argv[2])))
         ROOT_DIR = (Path(__file__).resolve().parent / '../../../').resolve()
         create_custom_infos(
-            dataset_cfg=dataset_cfg,
-            class_names=['Vehicle', 'Pedestrian', 'Cyclist'],
-            data_path=ROOT_DIR / 'data' / 'custom',
-            save_path=ROOT_DIR / 'data' / 'custom',
+            dataset_cfg= dataset_cfg,
+            # class_names=['Vehicle', 'Pedestrian', 'Cyclist'],
+            class_names=['tree'],
+            data_path=ROOT_DIR / 'data' / 'tree_data',
+            save_path=ROOT_DIR / 'data' / 'tree_data',
         )

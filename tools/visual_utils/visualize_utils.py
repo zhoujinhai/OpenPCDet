@@ -9,7 +9,6 @@ box_colormap = [
     [1, 1, 0],
 ]
 
-
 def check_numpy_to_torch(x):
     if isinstance(x, np.ndarray):
         return torch.from_numpy(x).float(), True

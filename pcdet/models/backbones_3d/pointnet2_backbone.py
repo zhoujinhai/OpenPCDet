@@ -67,12 +67,13 @@ class PointNet2MSG(nn.Module):
         """
         batch_size = batch_dict['batch_size']
         points = batch_dict['points']
+        # print("points size: ", points.shape, len(points[points[:, 0] == 0]), len(points[points[:, 0] == 1]))
         batch_idx, xyz, features = self.break_up_pc(points)
-
+        # print("batch_size: ", batch_size)
         xyz_batch_cnt = xyz.new_zeros(batch_size).int()
         for bs_idx in range(batch_size):
             xyz_batch_cnt[bs_idx] = (batch_idx == bs_idx).sum()
-
+        # print("min: ", xyz_batch_cnt.min(), " max: ", xyz_batch_cnt.max())
         assert xyz_batch_cnt.min() == xyz_batch_cnt.max()
         xyz = xyz.view(batch_size, -1, 3)
         features = features.view(batch_size, -1, features.shape[-1]).permute(0, 2, 1).contiguous() if features is not None else None
