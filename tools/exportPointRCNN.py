@@ -114,12 +114,12 @@ class PointNet2MSGExport(nn.Module):
             l_xyz.append(li_xyz)
             l_features.append(li_features)
 
-        for i in range(-1, -(len(self.FP_modules) + 1), -1):
-            l_features[i - 1] = self.FP_modules[i](
-                l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
-            )  # (B, C, N)
+        # for i in range(-1, -(len(self.FP_modules) + 1), -1):
+        #     l_features[i - 1] = self.FP_modules[i](
+        #         l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
+        #     )  # (B, C, N)
 
-        point_features = l_features[0]  # (B, C, N)
+        point_features = l_features[1]  # (B, C, N)
         return point_features
 
 
@@ -201,8 +201,8 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
         inp = batch_dict
         print("$$$$$$$$$$$$", type(batch_dict))  # $$$$$$$$$$$$ <class 'dict'>
         break
-    out = model(inp)
-    print(out)
+    # out = model(inp)
+    # print(out)
     batch_size = inp['batch_size']
     points = inp['points']
     # print("points size: ", points.shape, len(points[points[:, 0] == 0]), len(points[points[:, 0] == 1]))
@@ -218,14 +218,15 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     dicts = {}
     checkpoint = torch.load(args.ckpt, map_location='cuda')
     for key in checkpoint['model_state'].keys():
-        print(key)
+        # print(key)
         if "backbone_3d" in key:
             dicts[key[12:]] = checkpoint['model_state'][key]
-    pointnet2MSG = PointNet2MSGExport(cfg.MODEL.BACKBONE_3D, 4)
-    pointnet2MSG.load_state_dict(dicts)
-    pointnet2MSG.cuda()
-    pointnet2MSG.eval()
-    out = pointnet2MSG(xyz, features)
+
+    pointNet2_export = PointNet2MSGExport(cfg.MODEL.BACKBONE_3D, 4)
+    pointNet2_export.load_state_dict(dicts)
+    pointNet2_export.cuda()
+    pointNet2_export.eval()
+    out = pointNet2_export(xyz, features)
     print(out)
     onnx_path = "./test.onnx"
     print("start convert model to onnx >>>")
@@ -242,7 +243,7 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     #                       "select_ids": {0: "b", 1: "n", 2: "c"}
     #                   }
     # )
-    torch.onnx.export(pointnet2MSG,  # support torch.nn.Module, torch.jit.ScriptModule or torch.jit.ScriptFunction
+    torch.onnx.export(pointNet2_export,  # support torch.nn.Module, torch.jit.ScriptModule or torch.jit.ScriptFunction
                       (xyz, features, ),
                       onnx_path,
                       verbose=True,
@@ -250,7 +251,7 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
                       output_names=["pointnet2_features"],
                       opset_version=12,
                       operator_export_type=torch.onnx.OperatorExportTypes.ONNX,  # ONNX_ATEN_FALLBACK,
-
+                      enable_onnx_checker=False
                       )
 
     print("onnx model has exported!")
