@@ -109,6 +109,10 @@ class ThreeNN(Function):
     def backward(ctx, a=None, b=None):
         return None, None
 
+    @staticmethod
+    def symbolic(g, unknown, known):
+        return g.op("ThreeNN", unknown, known), g.op("ThreeNN", unknown, known)
+
 
 three_nn = ThreeNN.apply
 
@@ -156,6 +160,10 @@ class ThreeInterpolate(Function):
 
         pointnet2.three_interpolate_grad_wrapper(B, c, n, m, grad_out_data, idx, weight, grad_features.data)
         return grad_features, None, None
+
+    @staticmethod
+    def symbolic(g, features, idx, weight):
+        return g.op("ThreeInterpolate", features, idx, weight)
 
 
 three_interpolate = ThreeInterpolate.apply

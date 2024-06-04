@@ -114,12 +114,12 @@ class PointNet2MSGExport(nn.Module):
             l_xyz.append(li_xyz)
             l_features.append(li_features)
 
-        # for i in range(-1, -(len(self.FP_modules) + 1), -1):
-        #     l_features[i - 1] = self.FP_modules[i](
-        #         l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
-        #     )  # (B, C, N)
+        for i in range(-1, -(len(self.FP_modules) + 1), -1):
+            l_features[i - 1] = self.FP_modules[i](
+                l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
+            )  # (B, C, N)
 
-        point_features = l_features[1]  # (B, C, N)
+        point_features = l_features[0]  # (B, C, N)
         return point_features
 
 
