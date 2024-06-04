@@ -15,10 +15,9 @@ from pcdet.config import cfg, cfg_from_list, cfg_from_yaml_file, log_config_to_f
 from pcdet.datasets import build_dataloader
 from pcdet.models import build_network, load_data_to_gpu
 from pcdet.utils import common_utils
-from pcdet.ops import pointnet2
 from pcdet.ops.pointnet2.pointnet2_batch import pointnet2_modules
-from pcdet.ops.pointnet2.pointnet2_stack import pointnet2_modules as pointnet2_modules_stack
-from pcdet.ops.pointnet2.pointnet2_stack import pointnet2_utils as pointnet2_utils_stack
+from pcdet.models.dense_heads.point_head_template import PointHeadTemplate
+from pcdet.utils import box_coder_utils
 
 
 def parse_config():
@@ -119,25 +118,53 @@ class PointNet2MSGExport(nn.Module):
                 l_xyz[i - 1], l_xyz[i], l_features[i - 1], l_features[i]
             )  # (B, C, N)
 
-        point_features = l_features[0]  # (B, C, N)
-        return point_features
+        l_features[0] = l_features[0].permute(0, 2, 1).contiguous()  # (B, C, N)
+        l_features[0] = l_features[0].view(-1, l_features[0].shape[-1])
+        return l_features[0]
 
 
-class PointHeadBox(nn.Module):
-    def __init__(self, model_cfg):
-        super().__init__()
+class PointHeadBoxExport(PointHeadTemplate):
+    def __init__(self, model_cfg, input_channels, num_class):
+        super().__init__(model_cfg=model_cfg, num_class=num_class)
         self.model_cfg = model_cfg
+        self.cls_layers = self.make_fc_layers(
+            fc_cfg=self.model_cfg.CLS_FC,
+            input_channels=input_channels,
+            output_channels=num_class
+        )
 
-    def forward(self, feature):
+        target_cfg = self.model_cfg.TARGET_CONFIG
+        self.box_coder = getattr(box_coder_utils, target_cfg.BOX_CODER)(
+            **target_cfg.BOX_CODER_CONFIG
+        )
+        self.box_layers = self.make_fc_layers(
+            fc_cfg=self.model_cfg.REG_FC,
+            input_channels=input_channels,
+            output_channels=self.box_coder.code_size
+        )
+
+    def forward(self, xyz, feature):
         """
         extract class feature by cls_layers and box feature by box_layers
+        :param xyz: the coords of points
         :param feature: the extracted feature from PointNet2MSG, (B, C, N)
         :return: cls_feature (B, N_cls, N), box_feature (B, 8, N), 8 is center(x,y,z) , w, h, l, angle and score
         """
-        return
+        point_cls_preds = self.cls_layers(feature)  # (total_points, num_class)
+        point_box_preds = self.box_layers(feature)  # (total_points, box_code_size)
+
+        point_cls_preds_max, _ = point_cls_preds.max(dim=-1)
+        point_cls_scores = torch.sigmoid(point_cls_preds_max)
+
+        point_cls_preds, point_box_preds = self.generate_predicted_boxes(
+            points=xyz,
+            point_cls_preds=point_cls_preds, point_box_preds=point_box_preds
+        )
+
+        return point_cls_scores, point_cls_preds, point_box_preds
 
 
-class PointRCNNHead(nn.Module):
+class PointRCNNHeadExport(nn.Module):
     def __init__(self, model_cfg):
         super().__init__()
         self.model_cfg = model_cfg
@@ -192,8 +219,8 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     # print("******************")
     # # for idx, m in enumerate(model.named_modules()):
     # #     print(idx, "-", m)
-    new_model = NewModel(model)
-    print(new_model)
+    # new_model = NewModel(model)
+    # print(new_model)
     print("-----------------")
     inp = None
     for i, batch_dict in enumerate(test_loader):
@@ -206,19 +233,18 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     batch_size = inp['batch_size']
     points = inp['points']
     # print("points size: ", points.shape, len(points[points[:, 0] == 0]), len(points[points[:, 0] == 1]))
-    batch_idx, xyz, features = break_up_pc(points)
+    batch_idx, xyz_, features = break_up_pc(points)
     # print("batch_size: ", batch_size)
-    xyz_batch_cnt = xyz.new_zeros(batch_size).int()
+    xyz_batch_cnt = xyz_.new_zeros(batch_size).int()
     for bs_idx in range(batch_size):
         xyz_batch_cnt[bs_idx] = (batch_idx == bs_idx).sum()
     # print("min: ", xyz_batch_cnt.min(), " max: ", xyz_batch_cnt.max())
     assert xyz_batch_cnt.min() == xyz_batch_cnt.max()
-    xyz = xyz.view(batch_size, -1, 3)
+    xyz = xyz_.view(batch_size, -1, 3)
     features = features.view(batch_size, -1, features.shape[-1]).permute(0, 2, 1).contiguous() if features is not None else None
     dicts = {}
     checkpoint = torch.load(args.ckpt, map_location='cuda')
     for key in checkpoint['model_state'].keys():
-        # print(key)
         if "backbone_3d" in key:
             dicts[key[12:]] = checkpoint['model_state'][key]
 
@@ -226,29 +252,43 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     pointNet2_export.load_state_dict(dicts)
     pointNet2_export.cuda()
     pointNet2_export.eval()
-    out = pointNet2_export(xyz, features)
-    print(out)
-    onnx_path = "./test.onnx"
-    print("start convert model to onnx >>>")
-    # torch.onnx.export(new_model,  # support torch.nn.Module, torch.jit.ScriptModule or torch.jit.ScriptFunction
-    #                   (inp,),
-    #                   onnx_path,
-    #                   verbose=True,
-    #                   input_names=["points"],
-    #                   output_names=["select_ids"],
-    #                   opset_version=12,
-    #                   operator_export_type=torch.onnx.OperatorExportTypes.ONNX,  # ONNX_ATEN_FALLBACK,
-    #                   dynamic_axes={
-    #                       "points": {1: "b", 2: "c", 3: "n"},
-    #                       "select_ids": {0: "b", 1: "n", 2: "c"}
-    #                   }
-    # )
+    out1 = pointNet2_export(xyz, features)
+    print("out1: ", out1)
+
+    point_head_box_export = PointHeadBoxExport(cfg.MODEL.POINT_HEAD, out1.shape[-1], len(cfg.CLASS_NAMES))
+    dicts = {}
+    for key in checkpoint['model_state'].keys():
+        # print(key)
+        if "point_head" in key:
+            dicts[key[11:]] = checkpoint['model_state'][key]
+    point_head_box_export.load_state_dict(dicts)
+    point_head_box_export.cuda()
+    point_head_box_export.eval()
+    out2 = point_head_box_export(xyz_, out1)
+    print(out2)
+
+    onnx_msg_path = "./msg.onnx"
+    print("start convert msg model to onnx >>>")
+
     torch.onnx.export(pointNet2_export,  # support torch.nn.Module, torch.jit.ScriptModule or torch.jit.ScriptFunction
                       (xyz, features, ),
-                      onnx_path,
+                      onnx_msg_path,
                       verbose=True,
                       input_names=["points", "features"],
                       output_names=["pointnet2_features"],
+                      opset_version=12,
+                      operator_export_type=torch.onnx.OperatorExportTypes.ONNX,  # ONNX_ATEN_FALLBACK,
+                      enable_onnx_checker=False
+                      )
+
+    print("start convert point_head_box model to onnx >>>")
+    onnx_point_head_box_path = "./head_box.onnx"
+    torch.onnx.export(point_head_box_export,  # support torch.nn.Module, torch.jit.ScriptModule or torch.jit.ScriptFunction
+                      (xyz_, out1,),
+                      onnx_point_head_box_path,
+                      verbose=True,
+                      input_names=["points", "features"],
+                      output_names=["point_cls_scores", "point_cls_preds", "point_box_preds"],
                       opset_version=12,
                       operator_export_type=torch.onnx.OperatorExportTypes.ONNX,  # ONNX_ATEN_FALLBACK,
                       enable_onnx_checker=False

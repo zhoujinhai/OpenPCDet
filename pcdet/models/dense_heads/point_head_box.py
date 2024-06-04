@@ -92,6 +92,7 @@ class PointHeadBox(PointHeadTemplate):
 
         point_cls_preds_max, _ = point_cls_preds.max(dim=-1)
         batch_dict['point_cls_scores'] = torch.sigmoid(point_cls_preds_max)
+        print("point_cls_scores: ", batch_dict['point_cls_scores'])
 
         ret_dict = {'point_cls_preds': point_cls_preds,
                     'point_box_preds': point_box_preds}
@@ -107,6 +108,8 @@ class PointHeadBox(PointHeadTemplate):
             )
             batch_dict['batch_cls_preds'] = point_cls_preds
             batch_dict['batch_box_preds'] = point_box_preds
+            print("batch_cls_preds: ", batch_dict['batch_cls_preds'])
+            print("batch_box_preds: ", batch_dict['batch_box_preds'])
             batch_dict['batch_index'] = batch_dict['point_coords'][:, 0]
             batch_dict['cls_preds_normalized'] = False
 

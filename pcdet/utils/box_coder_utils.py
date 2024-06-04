@@ -69,7 +69,8 @@ class ResidualCoder(object):
         if self.encode_angle_by_sincos:
             rg_cos = cost + torch.cos(ra)
             rg_sin = sint + torch.sin(ra)
-            rg = torch.atan2(rg_sin, rg_cos)
+            # rg = torch.atan2(rg_sin, rg_cos)
+            rg = torch.atan(rg_sin/(rg_cos + 1e-6))
         else:
             rg = rt + ra
 
@@ -216,7 +217,7 @@ class PointResidualCoder(object):
             zg = zt + za
             dxg, dyg, dzg = torch.split(torch.exp(box_encodings[..., 3:6]), 1, dim=-1)
 
-        rg = torch.atan2(sint, cost)
-
+        # rg = torch.atan2(sint, cost)
+        rg = torch.atan(sint/(cost + 1e-6))
         cgs = [t for t in cts]
         return torch.cat([xg, yg, zg, dxg, dyg, dzg, rg, *cgs], dim=-1)
