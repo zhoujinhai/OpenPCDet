@@ -18,6 +18,9 @@ from pcdet.utils import common_utils
 from pcdet.ops.pointnet2.pointnet2_batch import pointnet2_modules
 from pcdet.models.dense_heads.point_head_template import PointHeadTemplate
 from pcdet.utils import box_coder_utils
+from pcdet.models.roi_heads.pointrcnn_head import RoIHeadTemplate
+from pcdet.ops.roipoint_pool3d import roipoint_pool3d_utils
+from pcdet.models.model_utils.model_nms_utils import class_agnostic_nms
 
 
 def parse_config():
@@ -164,12 +167,145 @@ class PointHeadBoxExport(PointHeadTemplate):
         return point_cls_scores, point_cls_preds, point_box_preds
 
 
-class PointRCNNHeadExport(nn.Module):
-    def __init__(self, model_cfg):
-        super().__init__()
+class PointRCNNHeadExport(RoIHeadTemplate):
+    def __init__(self, model_cfg, input_channels, num_class, batch_size=2):
+        super().__init__(num_class=num_class, model_cfg=model_cfg)
         self.model_cfg = model_cfg
+        self.batch_size = batch_size
+        use_bn = self.model_cfg.USE_BN
+        self.SA_modules = nn.ModuleList()
+        channel_in = input_channels
 
-    def forward(self, xyz, point_feature, cls_feature, box_feature):
+        self.num_prefix_channels = 3 + 2  # xyz + point_scores + point_depth
+        xyz_mlps = [self.num_prefix_channels] + self.model_cfg.XYZ_UP_LAYER
+        shared_mlps = []
+        for k in range(len(xyz_mlps) - 1):
+            shared_mlps.append(nn.Conv2d(xyz_mlps[k], xyz_mlps[k + 1], kernel_size=1, bias=not use_bn))
+            if use_bn:
+                shared_mlps.append(nn.BatchNorm2d(xyz_mlps[k + 1]))
+            shared_mlps.append(nn.ReLU())
+        self.xyz_up_layer = nn.Sequential(*shared_mlps)
+
+        c_out = self.model_cfg.XYZ_UP_LAYER[-1]
+        self.merge_down_layer = nn.Sequential(
+            nn.Conv2d(c_out * 2, c_out, kernel_size=1, bias=not use_bn),
+            *[nn.BatchNorm2d(c_out), nn.ReLU()] if use_bn else [nn.ReLU()]
+        )
+
+        for k in range(self.model_cfg.SA_CONFIG.NPOINTS.__len__()):
+            mlps = [channel_in] + self.model_cfg.SA_CONFIG.MLPS[k]
+
+            npoint = self.model_cfg.SA_CONFIG.NPOINTS[k] if self.model_cfg.SA_CONFIG.NPOINTS[k] != -1 else None
+            self.SA_modules.append(
+                pointnet2_modules.PointnetSAModule(
+                    npoint=npoint,
+                    radius=self.model_cfg.SA_CONFIG.RADIUS[k],
+                    nsample=self.model_cfg.SA_CONFIG.NSAMPLE[k],
+                    mlp=mlps,
+                    use_xyz=True,
+                    bn=use_bn
+                )
+            )
+            channel_in = mlps[-1]
+
+        self.cls_layers = self.make_fc_layers(
+            input_channels=channel_in, output_channels=self.num_class, fc_list=self.model_cfg.CLS_FC
+        )
+        self.reg_layers = self.make_fc_layers(
+            input_channels=channel_in,
+            output_channels=self.box_coder.code_size * self.num_class,
+            fc_list=self.model_cfg.REG_FC
+        )
+
+        self.roipoint_pool3d_layer = roipoint_pool3d_utils.RoIPointPool3d(
+            num_sampled_points=self.model_cfg.ROI_POINT_POOL.NUM_SAMPLED_POINTS,
+            pool_extra_width=self.model_cfg.ROI_POINT_POOL.POOL_EXTRA_WIDTH
+        )
+
+    @torch.no_grad()
+    def proposal_layer_export(self, batch_idx, batch_box_preds, batch_cls_preds, nms_config):
+        """
+        Args:
+            batch_dict:
+                batch_size:
+                batch_cls_preds: (B, num_boxes, num_classes | 1) or (N1+N2+..., num_classes | 1)
+                batch_box_preds: (B, num_boxes, 7+C) or (N1+N2+..., 7+C)
+                cls_preds_normalized: indicate whether batch_cls_preds is normalized
+                batch_index: optional (N1+N2+...)
+            nms_config:
+
+        Returns:
+            batch_dict:
+                rois: (B, num_rois, 7+C)
+                roi_scores: (B, num_rois)
+                roi_labels: (B, num_rois)
+
+        """
+        rois = batch_box_preds.new_zeros((self.batch_size, nms_config.NMS_POST_MAXSIZE, batch_box_preds.shape[-1]))
+        roi_scores = batch_box_preds.new_zeros((self.batch_size, nms_config.NMS_POST_MAXSIZE))
+        roi_labels = batch_box_preds.new_zeros((self.batch_size, nms_config.NMS_POST_MAXSIZE), dtype=torch.long)
+
+        for index in range(self.batch_size):
+            batch_mask = (batch_idx == index)
+
+            box_preds = batch_box_preds[batch_mask]
+            cls_preds = batch_cls_preds[batch_mask]
+
+            cur_roi_scores, cur_roi_labels = torch.max(cls_preds, dim=1)
+
+            selected, selected_scores = class_agnostic_nms(
+                    box_scores=cur_roi_scores, box_preds=box_preds, nms_config=nms_config
+                )
+
+            rois[index, :len(selected), :] = box_preds[selected]
+            roi_scores[index, :len(selected)] = cur_roi_scores[selected]
+            roi_labels[index, :len(selected)] = cur_roi_labels[selected]
+
+        return rois, roi_scores, roi_labels + 1
+
+    def roipool3d_gpu(self, batch_idx, point_coords, point_features, rois, point_scores):
+        """
+        Args:
+            batch_dict:
+                batch_size:
+                rois: (B, num_rois, 7 + C)
+                point_coords: (num_points, 4)  [bs_idx, x, y, z]
+                point_features: (num_points, C)
+                point_cls_scores: (N1 + N2 + N3 + ..., 1)
+                point_part_offset: (N1 + N2 + N3 + ..., 3)
+        Returns:
+
+        """
+        batch_cnt = point_coords.new_zeros(self.batch_size).int()
+        for bs_idx in range(self.batch_size):
+            batch_cnt[bs_idx] = (batch_idx == bs_idx).sum()
+
+        assert batch_cnt.min() == batch_cnt.max()
+
+        # point_scores = batch_dict['point_cls_scores'].detach()
+        point_depths = point_coords.norm(dim=1) / self.model_cfg.ROI_POINT_POOL.DEPTH_NORMALIZER - 0.5
+        point_features_list = [point_scores[:, None], point_depths[:, None], point_features]
+        point_features_all = torch.cat(point_features_list, dim=1)
+        batch_points = point_coords.view(self.batch_size, -1, 3)
+        batch_point_features = point_features_all.view(self.batch_size, -1, point_features_all.shape[-1])
+
+        with torch.no_grad():
+            pooled_features, pooled_empty_flag = self.roipoint_pool3d_layer(
+                batch_points, batch_point_features, rois
+            )  # pooled_features: (B, num_rois, num_sampled_points, 3 + C), pooled_empty_flag: (B, num_rois)
+
+            # canonical transformation
+            roi_center = rois[:, :, 0:3]
+            pooled_features[:, :, :, 0:3] -= roi_center.unsqueeze(dim=2)
+
+            pooled_features = pooled_features.view(-1, pooled_features.shape[-2], pooled_features.shape[-1])
+            pooled_features[:, :, 0:3] = common_utils.rotate_points_along_z(
+                pooled_features[:, :, 0:3], -rois.view(-1, rois.shape[-1])[:, 6]
+            )
+            pooled_features[pooled_empty_flag.view(-1) > 0] = 0
+        return pooled_features
+
+    def forward(self, batch_idx, xyz, point_features, point_cls_scores, cls_feature, box_feature):
         """
         generate roi(B, N_roi, 7), score(B, N_roi, 1), roi_labels(B, N_roi, 1) by proposal_layer
         assign feature to every roi by roipool3d_layer  pooled_feature(B, N_roi, C, N_down)
@@ -185,7 +321,32 @@ class PointRCNNHeadExport(nn.Module):
         :param box_feature: the box feature(B, N, 8), box info + score
         :return: cls_feature(B, N_roi, N_class), reg_feature(B, N_roi, 7)
         """
-        return
+        rois, roi_scores, roi_labels = self.proposal_layer_export(
+            batch_idx, box_feature, cls_feature, nms_config=self.model_cfg.NMS_CONFIG['TEST']
+        )
+        pooled_features = self.roipool3d_gpu(batch_idx, xyz, point_features, rois, point_cls_scores)
+        xyz_input = pooled_features[..., 0:self.num_prefix_channels].transpose(1, 2).unsqueeze(dim=3).contiguous()
+        xyz_features = self.xyz_up_layer(xyz_input)
+        point_features = pooled_features[..., self.num_prefix_channels:].transpose(1, 2).unsqueeze(dim=3)
+        merged_features = torch.cat((xyz_features, point_features), dim=1)
+        merged_features = self.merge_down_layer(merged_features)
+
+        l_xyz, l_features = [pooled_features[..., 0:3].contiguous()], [merged_features.squeeze(dim=3).contiguous()]
+
+        for i in range(len(self.SA_modules)):
+            li_xyz, li_features = self.SA_modules[i](l_xyz[i], l_features[i])
+            l_xyz.append(li_xyz)
+            l_features.append(li_features)
+
+        shared_features = l_features[-1]  # (total_rois, num_features, 1)
+        rcnn_cls = self.cls_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, 1 or 2)
+        rcnn_reg = self.reg_layers(shared_features).transpose(1, 2).contiguous().squeeze(dim=1)  # (B, C)
+
+        batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
+            batch_size=self.batch_size, rois=rois, cls_preds=rcnn_cls, box_preds=rcnn_reg
+        )
+
+        return batch_cls_preds, batch_box_preds
 
 
 class NewModel(nn.Module):
@@ -245,6 +406,7 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     dicts = {}
     checkpoint = torch.load(args.ckpt, map_location='cuda')
     for key in checkpoint['model_state'].keys():
+        print(key)
         if "backbone_3d" in key:
             dicts[key[12:]] = checkpoint['model_state'][key]
 
@@ -264,9 +426,20 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     point_head_box_export.load_state_dict(dicts)
     point_head_box_export.cuda()
     point_head_box_export.eval()
-    out2 = point_head_box_export(xyz_, out1)
-    print(out2)
+    point_cls_scores, point_cls_preds, point_box_preds = point_head_box_export(xyz_, out1)
+    print(point_cls_scores, point_cls_preds, point_box_preds)
 
+    point_rcnn_head_export = PointRCNNHeadExport(cfg.MODEL.ROI_HEAD, out1.shape[-1], len(cfg.CLASS_NAMES), batch_size)
+    dicts = {}
+    for key in checkpoint['model_state'].keys():
+        # print(key)
+        if "roi_head" in key:
+            dicts[key[9:]] = checkpoint['model_state'][key]
+    point_rcnn_head_export.load_state_dict(dicts)
+    point_rcnn_head_export.cuda()
+    point_rcnn_head_export.eval()
+    out3 = point_rcnn_head_export(batch_idx, xyz_, out1, point_cls_scores, point_cls_preds, point_box_preds)
+    print("out3: ", out3)
     onnx_msg_path = "./msg.onnx"
     print("start convert msg model to onnx >>>")
 
@@ -294,6 +467,18 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
                       enable_onnx_checker=False
                       )
 
+    print("start convert point_rcnn_head model to onnx >>>")
+    onnx_point_rcnn_head_box_path = "./point_rcnn_head.onnx"
+    torch.onnx.export(point_rcnn_head_export,
+                      (batch_idx, xyz_, out1, point_cls_scores, point_cls_preds, point_box_preds,),
+                      onnx_point_rcnn_head_box_path,
+                      verbose=True,
+                      input_names=["batch_idx", "points", "features", "pt_cls_scores", "pt_cls", "pt_box"],
+                      output_names=["batch_cls_preds", "batch_box_preds"],
+                      opset_version=12,
+                      operator_export_type=torch.onnx.OperatorExportTypes.ONNX,  # ONNX_ATEN_FALLBACK,
+                      enable_onnx_checker=False
+                      )
     print("onnx model has exported!")
 
 

@@ -146,6 +146,7 @@ class PointRCNNHead(RoIHeadTemplate):
             batch_dict['roi_labels'] = targets_dict['roi_labels']
 
         pooled_features = self.roipool3d_gpu(batch_dict)  # (total_rois, num_sampled_points, 3 + C)
+        print("pooled_features: ", pooled_features)
 
         xyz_input = pooled_features[..., 0:self.num_prefix_channels].transpose(1, 2).unsqueeze(dim=3).contiguous()
         xyz_features = self.xyz_up_layer(xyz_input)
@@ -168,6 +169,9 @@ class PointRCNNHead(RoIHeadTemplate):
             batch_cls_preds, batch_box_preds = self.generate_predicted_boxes(
                 batch_size=batch_dict['batch_size'], rois=batch_dict['rois'], cls_preds=rcnn_cls, box_preds=rcnn_reg
             )
+            print("batch_cls_preds: ----", batch_cls_preds)
+            print("batch_box_preds: ----", batch_box_preds)
+
             batch_dict['batch_cls_preds'] = batch_cls_preds
             batch_dict['batch_box_preds'] = batch_box_preds
             batch_dict['cls_preds_normalized'] = False

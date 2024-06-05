@@ -24,13 +24,15 @@ class RoIPointPool3d(nn.Module):
             pooled_empty_flag: (B, M)
         """
         return RoIPointPool3dFunction.apply(
-            points, point_features, boxes3d, self.pool_extra_width, self.num_sampled_points
+            # points, point_features, boxes3d, self.pool_extra_width, self.num_sampled_points
+            points, point_features, boxes3d, self.num_sampled_points
         )
 
 
 class RoIPointPool3dFunction(Function):
     @staticmethod
-    def forward(ctx, points, point_features, boxes3d, pool_extra_width, num_sampled_points=512):
+    def forward(ctx, points, point_features, boxes3d, num_sampled_points=512):
+        # def forward(ctx, points, point_features, boxes3d, pool_extra_width, num_sampled_points=512):
         """
         Args:
             ctx:
@@ -45,6 +47,7 @@ class RoIPointPool3dFunction(Function):
             pooled_empty_flag: (B, num_boxes)
         """
         assert points.shape.__len__() == 3 and points.shape[2] == 3
+        pool_extra_width = [0.0, 0.0, 0.0]
         batch_size, boxes_num, feature_len = points.shape[0], boxes3d.shape[1], point_features.shape[2]
         pooled_boxes3d = box_utils.enlarge_box3d(boxes3d.view(-1, 7), pool_extra_width).view(batch_size, -1, 7)
 
@@ -61,6 +64,11 @@ class RoIPointPool3dFunction(Function):
     @staticmethod
     def backward(ctx, grad_out):
         raise NotImplementedError
+
+    @staticmethod
+    def symbolic(g, points, point_features, boxes3d, num_sampled_points):
+        return g.op("RoIPointPool3dFunction", points, point_features, boxes3d, num_sampled_points_i=num_sampled_points),  \
+               g.op("RoIPointPool3dFunction", points, point_features, boxes3d, num_sampled_points_i=num_sampled_points)
 
 
 if __name__ == '__main__':

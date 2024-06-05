@@ -93,7 +93,9 @@ class RoIHeadTemplate(nn.Module):
             rois[index, :len(selected), :] = box_preds[selected]
             roi_scores[index, :len(selected)] = cur_roi_scores[selected]
             roi_labels[index, :len(selected)] = cur_roi_labels[selected]
-
+        print("rois: ", rois)
+        print("roi_scores: ", roi_scores)
+        print("roi_labels: ", roi_labels + 1)
         batch_dict['rois'] = rois
         batch_dict['roi_scores'] = roi_scores
         batch_dict['roi_labels'] = roi_labels + 1
