@@ -405,6 +405,7 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
     features = features.view(batch_size, -1, features.shape[-1]).permute(0, 2, 1).contiguous() if features is not None else None
     dicts = {}
     checkpoint = torch.load(args.ckpt, map_location='cuda')
+    ## 权重选择
     for key in checkpoint['model_state'].keys():
         print(key)
         if "backbone_3d" in key:
