@@ -358,6 +358,23 @@ class NewModel(nn.Module):
         out = self.sa(input)
         return out
 
+class PointRCNN(nn.Module):
+    def __init__(self, model_cfg, input_channels, batch_size=2):
+        super().__init__()
+        num_class = len(model_cfg.CLASS_NAMES)
+        feature_dim = model_cfg.MODEL.BACKBONE_3D.FP_MLPS[0][0]
+        self.batch_size = batch_size
+        self.msg = PointNet2MSGExport(model_cfg.MODEL.BACKBONE_3D, input_channels)
+        self.point_head_box = PointHeadBoxExport(model_cfg.MODEL.POINT_HEAD, feature_dim, num_class)
+        self.point_rcnn_head = PointRCNNHeadExport(model_cfg.MODEL.ROI_HEAD, feature_dim, num_class, batch_size)
+
+    def forward(self, xyz_, features, batch_idx):
+        xyz = xyz_.view(self.batch_size, -1, 3)
+        out1 = self.msg(xyz, features)
+        print("out1: ", out1.shape, "xyz_: ", xyz_.shape)
+        point_cls_scores, point_cls_preds, point_box_preds = self.point_head_box(xyz_, out1)
+        out = self.point_rcnn_head(batch_idx, xyz_, out1, point_cls_scores, point_cls_preds, point_box_preds)
+        return out
 
 def break_up_pc(pc):
     batch_idx = pc[:, 0]
@@ -366,7 +383,7 @@ def break_up_pc(pc):
     return batch_idx, xyz, features
 
 
-def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id, dist_test=False):
+def export_single_ckpt_split(model, test_loader, args, eval_output_dir, logger, epoch_id, dist_test=False):
     # load checkpoint
     model.load_params_from_file(filename=args.ckpt, logger=logger, to_cpu=dist_test,
                                 pre_trained_path=args.pretrained_model)
@@ -482,6 +499,68 @@ def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_
                       )
     print("onnx model has exported!")
 
+def export_single_ckpt(model, test_loader, args, eval_output_dir, logger, epoch_id, dist_test=False):
+    # load checkpoint
+    model.load_params_from_file(filename=args.ckpt, logger=logger, to_cpu=dist_test,
+                                pre_trained_path=args.pretrained_model)
+    model.cuda()
+    model.eval()
+
+    inp = None
+    for i, batch_dict in enumerate(test_loader):
+        load_data_to_gpu(batch_dict)
+        inp = batch_dict
+        print("$$$$$$$$$$$$", type(batch_dict))  # $$$$$$$$$$$$ <class 'dict'>
+        break
+    # out = model(inp)
+    # print(out)
+    batch_size = inp['batch_size']
+    points = inp['points']
+    # print("points size: ", points.shape, len(points[points[:, 0] == 0]), len(points[points[:, 0] == 1]))
+    batch_idx, xyz_, features = break_up_pc(points)
+    # print("batch_size: ", batch_size)
+    xyz_batch_cnt = xyz_.new_zeros(batch_size).int()
+    for bs_idx in range(batch_size):
+        xyz_batch_cnt[bs_idx] = (batch_idx == bs_idx).sum()
+    # print("min: ", xyz_batch_cnt.min(), " max: ", xyz_batch_cnt.max())
+    assert xyz_batch_cnt.min() == xyz_batch_cnt.max()
+    xyz = xyz_.view(batch_size, -1, 3)
+    features = features.view(batch_size, -1, features.shape[-1]).permute(0, 2, 1).contiguous() if features is not None else None
+    dicts = {}
+    checkpoint = torch.load(args.ckpt, map_location='cuda')
+    for key in checkpoint['model_state'].keys():
+        if "backbone_3d" in key:
+            key_name = "msg." + key[12:]
+            dicts[key_name] = checkpoint['model_state'][key]
+        if "point_head" in key:
+            key_name = "point_head_box." + key[11:]
+            dicts[key_name] = checkpoint['model_state'][key]
+        if "roi_head" in key:
+            key_name = "point_rcnn_head." + key[9:]
+            dicts[key_name] = checkpoint['model_state'][key]
+
+    point_rcnn = PointRCNN(cfg, 4)
+    point_rcnn.load_state_dict(dicts)
+    print("load weight success!")
+    point_rcnn.cuda()
+    point_rcnn.eval()
+    out = point_rcnn(xyz_, features, batch_idx)
+    print("out: ", out)
+
+    onnx_msg_path = "./pointrcnn.onnx"
+    print("start convert pointrcnn model to onnx >>>")
+    torch.onnx.export(point_rcnn,  # support torch.nn.Module, torch.jit.ScriptModule or torch.jit.ScriptFunction
+                      (xyz_, features, batch_idx, ),
+                      onnx_msg_path,
+                      verbose=True,
+                      input_names=["points", "features", "batch_idx"],
+                      output_names=["batch_cls_preds", "batch_box_preds"],
+                      opset_version=12,
+                      operator_export_type=torch.onnx.OperatorExportTypes.ONNX,  # ONNX_ATEN_FALLBACK,
+                      enable_onnx_checker=False
+                      )
+    print("onnx model has exported!")
+    
 
 def get_no_evaluated_ckpt(ckpt_dir, ckpt_record_file, args):
     ckpt_list = glob.glob(os.path.join(ckpt_dir, '*checkpoint_epoch_*.pth'))
@@ -567,3 +646,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
