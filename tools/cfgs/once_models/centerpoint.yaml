@@ -8,6 +8,7 @@ MODEL:
 
     VFE:
         NAME: MeanVFE
+        #  https://github.com/open-mmlab/OpenPCDet/issues/1589
 
     BACKBONE_3D:
         NAME: VoxelResBackBone8x
